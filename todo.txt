@@ -1,0 +1,73 @@
+pdfs -> parse -> mds -> chunk[:1024] -> extract_keywords_from_chunks [intelligently using LLM or prolog?] -> {chunk + keywords} = payload
+
+payload + chunk_embeddings -> qdrant_collection 
+or
+chunk_embeddings ->  qdrant_chunk_collection && keyword_embeddings -> qdrant_keyword_collection
+have a primary key (common) between both collections
+
+
+two flows:
+
+1. Insurance Agent:
+user_query -> enhance_user_query(using a smaller model) -> generate_embeddings_for_enhanced_query -> 
+seach_for_top_k_similar_chunks_in_chunk_collection -> use_top_k_chunks + user_query with gemini 2.5 pro (solid prompt) -> 
+response
+try using continous chat with history management for this agent!
+
+
+2. Recommender system for recommending best policy accoording to the user_info
+
+
+
+
+
+for parsing policies:
+
+{
+    "company_name": "hdfc" or "lic",
+    "type": "health" or "motor" or "insurance plans" or "pension plans",  
+    "sub_type" : "if exist: "endowment plans" or "whole life plans",
+    "title": "title_of_the_pdf",
+    "pdf_link": ".pdf"
+}
+
+
+
+embedding generation:
+
+{
+    "company_name": "hdfc" or "lic",
+    "type": "health" or "motor" or "insurance plans" or "pension plans",  
+    "sub_type" : "if exist: "endowment plans" or "whole life plans",
+    "title": "title_of_the_pdf",
+    "pdf_link": ".pdf",
+    "original_content": "parsed_pdf_in_markdown",
+    "chunks": List of chunks for this pdf,
+    "keywords": List of keywords for all the chunks in this doc
+}
+
+payload:
+{
+    "company_name": "hdfc" or "lic",
+    "type": "health" or "motor" or "insurance plans" or "pension plans",  
+    "sub_type" : "if exist: "endowment plans" or "whole life plans",
+    "title": "title_of_the_pdf",
+    "pdf_link": ".pdf",
+    "chunk": "one chunk"
+    "keywords": list of keywords for that chunk
+} 
+with chunk embeddings in policy_chunk
+with keyword embeddings in policy_keyword
+
+
+
+
+
+
+two flows to be added:
+
+> from a a dict user_info (keywords) -> generate embeddings for all these keywords -> search for most similar chunks in policy_keyword collection -> get_chunks -> get_the_actual_policy_urls_from_mongo_for_those_chunks [remove duplicates] (this could also be just retrieved from qdrant payload)
+endpoint will take user_info dict as input, and return the payload for the docs!
+
+
+> once we get the recommended policies -> get the "parsed_content" for those urls from mongo for each policy -> and pass parsed_content to gemini model -> and give a list of pre-generated synthetic situations -> and model will figure out whether this/that is covered in the policy or not (basically help the user identify in what-what strage circumstances they will get the policy or not)
