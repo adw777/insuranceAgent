@@ -1,3 +1,6 @@
 __pycache__/*
 venv/*
 .env
+__pycache__\
+clients/__pycache__/gemini_client.cpython-311.pyc
+clients\__pycache__\

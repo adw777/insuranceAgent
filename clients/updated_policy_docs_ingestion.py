@@ -1767,15 +1767,14 @@ Focus on:
 - Financial terms
 - Medical conditions or treatments mentioned
 
-Text: {text[:2000]}...
+Text: {text}
 
 Return only the keywords as a comma-separated list, no explanations."""
 
             response = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=150,
-                temperature=0.3
+                max_tokens=150
             )
             
             keywords_text = response.choices[0].message.content.strip()
