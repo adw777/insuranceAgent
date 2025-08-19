@@ -69,5 +69,29 @@ two flows to be added:
 > from a a dict user_info (keywords) -> generate embeddings for all these keywords -> search for most similar chunks in policy_keyword collection -> get_chunks -> get_the_actual_policy_urls_from_mongo_for_those_chunks [remove duplicates] (this could also be just retrieved from qdrant payload)
 endpoint will take user_info dict as input, and return the payload for the docs!
 
+> from a list of user_info + preferences -> generate a query -> generate embeddings for the query -> search for the most similar top k chunks in "policy_chunks2" collection in qdrant -> re-rank the retrieved policies using gemini model for better relevancy with the user_info & preferences; returns top_n policies
 
 > once we get the recommended policies -> get the "parsed_content" for those urls from mongo for each policy -> and pass parsed_content to gemini model -> and give a list of pre-generated synthetic situations -> and model will figure out whether this/that is covered in the policy or not (basically help the user identify in what-what strage circumstances they will get the policy or not)
+
+
+
+
+
+select_policy_chat -> chat with one doc and answer user questions regarding it!
+updates: make it chat with topK insurance policies (recommended) simultaneously and help user select the best out of these top_K
+also append initial user_info in model context
+
+here this update is not required actually as this endpoint will take in url of the pdf as input and then u can chat with that policy... so user can actually select from the frontend which pdf he wants to chat with, and that url for that pdf will input this endpoint - and then change the pdf after one is done!
+
+once one policy is selected and finalised from select_policy_chat->
+next: generate random hypothetical scenarios (pre generated ones and also could be input from the user)
+now model will take these scenarios and policy content + user info and tell whether these scenarios r covered in the policy or not! 
+
+policy_analyzer -> takes pdf_url -> analyzes policy for multiple scenarios -> returns a detailed report of whats included and whats not in the selected policy!
+
+
+streamlit_app -> tabs for different endpoints
+/chat : recommenation via chat (whats in the streamlit right now)
+/recommend-policies : user fills out a form (gives crucial info) and policies would be recommended
+/chat-with-policy : when user gets recommended policies in both flows (chat or recommend-policies) for each policy user can click on that policy and chat with the policy using this endpoint (pdf_url for the selected policy will go as input for this endpoint); this will be like chat in the /chat endpoint
+/policy-analyzer : this is also similar, but not in chat format. for a selected policy from the recommended policies from chat or recommend-policies, url of the selected policy will be the input and this returns a detailed analysis in markdown

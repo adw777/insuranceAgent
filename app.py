@@ -4,13 +4,13 @@ from typing import List, Dict, Any, Optional
 import asyncio
 import logging
 import json
+import time
 
-# Import from insurance_agent.py
-from insurance_recommender_chat import InsuranceAgent, UserProfile
+from controllers.insurance_recommender_chat import InsuranceAgent, UserProfile
 from clients.gemini_client import ChatMessage
-
-# Import from insurance_recommender_keywords.py
-from insurance_recommender_keywords import PolicyRecommender, UserProfile as KeywordUserProfile, PolicyRecommendation
+from controllers.insurance_recommender_keywords import PolicyRecommender, UserProfile as KeywordUserProfile, PolicyRecommendation
+from controllers.select_policy_chat import PolicyDocumentChat
+from controllers.policy_analyzer import PolicyScenarioAnalyzer
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -19,13 +19,14 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(
     title="AI Insurance Agent API",
-    description="API for AI-powered insurance policy recommendations",
+    description="API for AI-powered insurance policy recommendations and chat",
     version="1.0.0"
 )
 
 # Global agent instances
 agent = None
 policy_recommender = None
+policy_chat_instances = {}  # Store policy chat instances by session
 
 @app.on_event("startup")
 async def startup_event():
@@ -108,7 +109,7 @@ class RecommendationsRequest(BaseModel):
     user_profile: KeywordUserProfileRequest
     top_k: int = 20
     top_n: int = 5
-    score_threshold: float = 0.7
+    score_threshold: float = 0.5
 
 class RecommendationsResponse(BaseModel):
     """Response model for policy recommendations."""
@@ -131,6 +132,46 @@ class ChatResponse(BaseModel):
     search_reasoning: Optional[str] = None
     policies_found: List[PolicyInfo] = []
     conversation_id: Optional[str] = None
+
+# New models for policy chat endpoint
+class PolicyChatRequest(BaseModel):
+    """Request model for policy chat endpoint."""
+    pdf_url: str
+    message: str
+    session_id: Optional[str] = None
+    collection_name: str = "policies"
+
+class PolicyDocumentInfo(BaseModel):
+    """Policy document information."""
+    title: str
+    url: str
+    total_chunks: int
+    total_tokens: int
+    average_tokens_per_chunk: int
+    chat_session_messages: int
+
+class PolicyChatResponse(BaseModel):
+    """Response model for policy chat endpoint."""
+    response: str
+    document_info: PolicyDocumentInfo
+    session_id: str
+    token_usage: Dict[str, Any]
+
+class PolicyAnalyzerRequest(BaseModel):
+    """Request model for policy analyzer endpoint."""
+    pdf_url: str
+    collection_name: str = "policies"
+
+class PolicyAnalyzerResponse(BaseModel):
+    """Response model for policy analyzer endpoint."""
+    analysis: str
+    document_title: str
+    document_id: str
+    total_chunks: int
+    total_tokens: int
+    processing_time_seconds: float
+    token_usage: Dict[str, Any]
+    pdf_url: str
 
 def convert_profile_to_response(profile: UserProfile) -> UserProfileResponse:
     """Convert UserProfile to UserProfileResponse."""
@@ -225,6 +266,214 @@ def convert_keyword_recommendations_to_response(recommendations: List[PolicyReco
         for rec in recommendations
     ]
 
+def get_document_url(document: Dict[str, Any]) -> str:
+    """Extract URL from document, checking multiple possible field names."""
+    url_fields = ["url", "pdf_url", "pdf_link", "link"]
+    for field in url_fields:
+        url = document.get(field, "")
+        if url:
+            return url
+    return ""
+
+async def get_or_create_policy_chat(session_id: str, pdf_url: str, collection_name: str) -> PolicyDocumentChat:
+    """Get existing policy chat instance or create new one."""
+    global policy_chat_instances
+    
+    if session_id not in policy_chat_instances:
+        # Create new policy chat instance
+        policy_chat = PolicyDocumentChat(collection_name=collection_name)
+        await policy_chat.initialize()
+        
+        # Search for document
+        document = policy_chat.search_document_by_url(pdf_url)
+        if not document:
+            raise HTTPException(status_code=404, detail=f"Policy document not found for URL: {pdf_url}")
+        
+        # Update the document metadata to include the correct URL
+        document_url = get_document_url(document)
+        if not document_url:
+            # If no URL found in document, use the search URL
+            document_url = pdf_url
+        
+        # Prepare document chunks
+        if not policy_chat.prepare_document_chunks(document):
+            raise HTTPException(status_code=500, detail="Failed to process policy document content")
+        
+        # Override the URL in document metadata to ensure it's correct
+        policy_chat.document_metadata["url"] = document_url
+        
+        policy_chat_instances[session_id] = policy_chat
+        logger.info(f"Created new policy chat session: {session_id}")
+    
+    return policy_chat_instances[session_id]
+
+@app.post("/chat-with-policy", response_model=PolicyChatResponse)
+async def chat_with_policy(request: PolicyChatRequest):
+    """
+    Chat with a specific insurance policy document.
+    
+    **Input:**
+    - `pdf_url` (string): URL of the PDF policy document to chat with
+    - `message` (string): User's question about the policy
+    - `session_id` (string, optional): Session ID for maintaining conversation context
+    - `collection_name` (string, optional): MongoDB collection name (default: "policies")
+    
+    **Output:**
+    - `response` (string): AI assistant's response about the policy
+    - `document_info` (object): Information about the loaded policy document
+        - `title` (string): Policy document title
+        - `url` (string): Policy document URL
+        - `total_chunks` (int): Number of text chunks created from document
+        - `total_tokens` (int): Total tokens in the document
+        - `average_tokens_per_chunk` (int): Average tokens per chunk
+        - `chat_session_messages` (int): Number of messages in current session
+    - `session_id` (string): Session ID for this conversation
+    - `token_usage` (object): Token usage and cost information
+    
+    **Example Request:**
+    ```json
+    {
+        "pdf_url": "https://example.com/health-policy.pdf",
+        "message": "What are the key benefits of this policy?",
+        "session_id": "user123_policy456",
+        "collection_name": "policies"
+    }
+    ```
+    
+    **Example Response:**
+    ```json
+    {
+        "response": "This health insurance policy offers comprehensive coverage including...",
+        "document_info": {
+            "title": "Comprehensive Health Insurance Policy",
+            "url": "https://example.com/health-policy.pdf",
+            "total_chunks": 15,
+            "total_tokens": 45000,
+            "average_tokens_per_chunk": 3000,
+            "chat_session_messages": 2
+        },
+        "session_id": "user123_policy456",
+        "token_usage": {
+            "total_cost": 0.0234,
+            "totals": {
+                "total_tokens": 1250
+            }
+        }
+    }
+    ```
+    """
+    try:
+        import uuid
+        import time
+        
+        # Generate session ID if not provided
+        session_id = request.session_id or f"policy_chat_{uuid.uuid4().hex[:8]}"
+        
+        # Get or create policy chat instance
+        policy_chat = await get_or_create_policy_chat(
+            session_id, request.pdf_url, request.collection_name
+        )
+        
+        # Process user message
+        start_time = time.time()
+        response_text = await policy_chat.chat(request.message)
+        processing_time = time.time() - start_time
+        
+        # Get document info
+        doc_info_dict = policy_chat.get_document_info()
+        
+        document_url = doc_info_dict.get("url", "")
+        if not document_url:
+            document_url = request.pdf_url
+        
+        document_info = PolicyDocumentInfo(
+            title=doc_info_dict.get("title", "Unknown Policy"),
+            url=document_url,
+            total_chunks=doc_info_dict.get("total_chunks", 0),
+            total_tokens=doc_info_dict.get("total_tokens", 0),
+            average_tokens_per_chunk=doc_info_dict.get("average_tokens_per_chunk", 0),
+            chat_session_messages=doc_info_dict.get("chat_session_messages", 0)
+        )
+        
+        # Get token usage
+        token_usage = policy_chat.get_token_usage_summary()
+        
+        # Prepare response
+        chat_response = PolicyChatResponse(
+            response=response_text,
+            document_info=document_info,
+            session_id=session_id,
+            token_usage=token_usage
+        )
+        
+        logger.info(f"Policy chat completed in {processing_time:.2f}s - Session: {session_id}")
+        return chat_response
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error in policy chat endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process policy chat: {str(e)}")
+
+@app.delete("/chat-with-policy/{session_id}")
+async def close_policy_chat_session(session_id: str):
+    """
+    Close a policy chat session and clean up resources.
+    
+    **Input:**
+    - `session_id` (string): Session ID to close
+    
+    **Output:**
+    - `message` (string): Confirmation message
+    - `session_closed` (boolean): Whether session was successfully closed
+    """
+    global policy_chat_instances
+    
+    if session_id in policy_chat_instances:
+        try:
+            policy_chat_instances[session_id].close()
+            del policy_chat_instances[session_id]
+            logger.info(f"Closed policy chat session: {session_id}")
+            return {
+                "message": f"Policy chat session {session_id} closed successfully",
+                "session_closed": True
+            }
+        except Exception as e:
+            logger.error(f"Error closing policy chat session {session_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to close session: {str(e)}")
+    else:
+        return {
+            "message": f"Policy chat session {session_id} not found",
+            "session_closed": False
+        }
+
+@app.get("/chat-with-policy/sessions")
+async def list_policy_chat_sessions():
+    """
+    List all active policy chat sessions.
+    
+    **Output:**
+    - `active_sessions` (list): List of active session IDs
+    - `total_sessions` (int): Total number of active sessions
+    """
+    global policy_chat_instances
+    
+    sessions = []
+    for session_id, policy_chat in policy_chat_instances.items():
+        doc_info = policy_chat.get_document_info()
+        sessions.append({
+            "session_id": session_id,
+            "document_title": doc_info.get("title", "Unknown"),
+            "document_url": doc_info.get("url", ""),
+            "messages_count": doc_info.get("chat_session_messages", 0)
+        })
+    
+    return {
+        "active_sessions": sessions,
+        "total_sessions": len(sessions)
+    }
+
 @app.post("/recommend-policies", response_model=RecommendationsResponse)
 async def recommend_policies(request: RecommendationsRequest):
     """
@@ -275,7 +524,8 @@ async def recommend_policies(request: RecommendationsRequest):
             "additional_notes": "Looking for family coverage"
         },
         "top_k": 15,
-        "top_n": 3
+        "top_n": 3,
+        "score_threshold": 0.5
     }
     ```
     
@@ -502,6 +752,132 @@ async def chat_with_agent(request: ChatRequest):
         logger.error(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@app.post("/policy-analyzer", response_model=PolicyAnalyzerResponse)
+async def analyze_policy(request: PolicyAnalyzerRequest):
+    """
+    Analyze an insurance policy document against predefined scenarios.
+    
+    **Input:**
+    - `pdf_url` (string): URL of the PDF policy document to analyze
+    - `collection_name` (string, optional): MongoDB collection name (default: "policies")
+    
+    **Output:**
+    - `analysis` (string): Comprehensive scenario-based analysis of the policy
+    - `document_title` (string): Title of the analyzed policy document
+    - `document_id` (string): MongoDB document ID
+    - `total_chunks` (int): Number of text chunks created from document
+    - `total_tokens` (int): Total tokens in the document
+    - `processing_time_seconds` (float): Time taken to complete the analysis
+    - `token_usage` (object): Token usage and cost information
+    - `pdf_url` (string): The analyzed policy document URL
+    
+    **Example Request:**
+    ```json
+    {
+        "pdf_url": "https://example.com/health-policy.pdf",
+        "collection_name": "policies"
+    }
+    ```
+    
+    **Example Response:**
+    ```json
+    {
+        "analysis": "**Scenario**: Emergency Room Visits\\n- _Included?_: Yes - Policy covers emergency medical expenses...",
+        "document_title": "Comprehensive Health Insurance Policy",
+        "document_id": "507f1f77bcf86cd799439011",
+        "total_chunks": 15,
+        "total_tokens": 45000,
+        "processing_time_seconds": 45.2,
+        "token_usage": {
+            "total_cost": 0.0234,
+            "totals": {
+                "total_tokens": 1250
+            }
+        },
+        "pdf_url": "https://example.com/health-policy.pdf"
+    }
+    ```
+    """
+    try:
+        start_time = time.time()
+        
+        # Initialize the policy analyzer
+        analyzer = PolicyScenarioAnalyzer(collection_name=request.collection_name)
+        
+        try:
+            # Initialize clients
+            await analyzer.initialize()
+            logger.info(f"Policy analyzer initialized for URL: {request.pdf_url}")
+            
+            # Search for document first to get metadata
+            document = analyzer.search_document_by_url(request.pdf_url)
+            if not document:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Policy document not found for URL: {request.pdf_url}"
+                )
+            
+            # Extract document metadata
+            doc_title = document.get("title", "Unknown Policy")
+            doc_id = str(document.get("_id", ""))
+            
+            # Prepare document chunks to get token count
+            document_chunks = analyzer.prepare_document_chunks(document)
+            if not document_chunks:
+                raise HTTPException(
+                    status_code=500, 
+                    detail="Failed to process policy document content"
+                )
+            
+            # Calculate total tokens
+            total_tokens = sum(analyzer.chunker.count_tokens(chunk) for chunk in document_chunks)
+            
+            logger.info(f"Starting analysis for document: {doc_title} (ID: {doc_id})")
+            
+            # Perform the analysis
+            analysis_result = await analyzer.analyze_policy(request.pdf_url)
+            
+            if not analysis_result:
+                raise HTTPException(
+                    status_code=500, 
+                    detail="Failed to generate policy analysis. Check server logs for details."
+                )
+            
+            # Calculate processing time
+            processing_time = time.time() - start_time
+            
+            # Get token usage summary
+            token_usage = analyzer.get_token_usage_summary()
+            
+            # Prepare response
+            response = PolicyAnalyzerResponse(
+                analysis=analysis_result,
+                document_title=doc_title,
+                document_id=doc_id,
+                total_chunks=len(document_chunks),
+                total_tokens=total_tokens,
+                processing_time_seconds=round(processing_time, 2),
+                token_usage=token_usage,
+                pdf_url=request.pdf_url
+            )
+            
+            logger.info(f"Policy analysis completed in {processing_time:.2f}s for {doc_title}")
+            return response
+            
+        finally:
+            # Always clean up resources
+            analyzer.close()
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error in policy analyzer endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to analyze policy: {str(e)}"
+        )
+
 @app.get("/health")
 async def health_check():
     """
@@ -511,12 +887,14 @@ async def health_check():
     - `status` (string): "healthy" if service is running
     - `agent_initialized` (boolean): Whether the insurance agent is ready
     - `policy_recommender_initialized` (boolean): Whether the policy recommender is ready
+    - `active_policy_chat_sessions` (int): Number of active policy chat sessions
     """
-    global agent, policy_recommender
+    global agent, policy_recommender, policy_chat_instances
     return {
         "status": "healthy",
         "agent_initialized": agent is not None,
-        "policy_recommender_initialized": policy_recommender is not None
+        "policy_recommender_initialized": policy_recommender is not None,
+        "active_policy_chat_sessions": len(policy_chat_instances)
     }
 
 @app.get("/")
@@ -532,7 +910,9 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "/chat": "POST - Chat with the insurance agent",
+            "/chat-with-policy": "POST - Chat with a specific policy document",
             "/recommend-policies": "POST - Get AI-powered policy recommendations",
+            "/policy-analyzer": "POST - Analyze a policy document",
             "/health": "GET - Health check",
             "/docs": "GET - API documentation"
         }
