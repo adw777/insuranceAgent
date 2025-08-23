@@ -11,8 +11,8 @@ from clients.gemini_client import ChatMessage
 from controllers.insurance_recommender_keywords import PolicyRecommender, UserProfile as KeywordUserProfile, PolicyRecommendation
 from controllers.select_policy_chat import PolicyDocumentChat
 from controllers.policy_analyzer import PolicyScenarioAnalyzer
-
-# Set up logging
+from controllers.chat_with_multiple_policies import PolicySelectorChat
+# Set up logging    
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ app = FastAPI(
 agent = None
 policy_recommender = None
 policy_chat_instances = {}  # Store policy chat instances by session
+multi_policy_chat_instances = {}  # Store multi-policy chat instances by session
 
 @app.on_event("startup")
 async def startup_event():
@@ -156,6 +157,37 @@ class PolicyChatResponse(BaseModel):
     document_info: PolicyDocumentInfo
     session_id: str
     token_usage: Dict[str, Any]
+
+# New models for multi-policy chat endpoint
+class MultiPolicyChatRequest(BaseModel):
+    """Request model for multi-policy chat endpoint."""
+    message: str
+    pdf_urls: List[str]
+    session_id: Optional[str] = None
+    collection_name: str = "policy_chunks2"
+    mongo_collection_name: str = "policies"
+    top_k: int = 10
+
+class MultiPolicyInfo(BaseModel):
+    """Multi-policy information."""
+    title: str
+    url: str
+    content_tokens: int
+
+class MultiPolicyChatInfo(BaseModel):
+    """Multi-policy chat session information."""
+    total_policies: int
+    total_tokens: int
+    policies: List[MultiPolicyInfo]
+    chat_session_messages: int
+
+class MultiPolicyChatResponse(BaseModel):
+    """Response model for multi-policy chat endpoint."""
+    response: str
+    policy_info: MultiPolicyChatInfo
+    session_id: str
+    token_usage: Dict[str, Any]
+    is_initial_analysis: bool
 
 class PolicyAnalyzerRequest(BaseModel):
     """Request model for policy analyzer endpoint."""
@@ -306,6 +338,221 @@ async def get_or_create_policy_chat(session_id: str, pdf_url: str, collection_na
         logger.info(f"Created new policy chat session: {session_id}")
     
     return policy_chat_instances[session_id]
+
+async def get_or_create_multi_policy_chat(session_id: str, pdf_urls: List[str], collection_name: str, mongo_collection_name: str) -> PolicySelectorChat:
+    """Get existing multi-policy chat instance or create new one."""
+    global multi_policy_chat_instances
+    
+    if session_id not in multi_policy_chat_instances:
+        # Create new multi-policy chat instance
+        multi_policy_chat = PolicySelectorChat(
+            collection_name=collection_name,
+            mongo_collection_name=mongo_collection_name
+        )
+        await multi_policy_chat.initialize()
+        multi_policy_chat_instances[session_id] = multi_policy_chat
+        logger.info(f"Created new multi-policy chat session: {session_id}")
+    
+    return multi_policy_chat_instances[session_id]
+
+@app.post("/chat-with-multiple-policies", response_model=MultiPolicyChatResponse)
+async def chat_with_multiple_policies(request: MultiPolicyChatRequest):
+    """
+    Chat with multiple insurance policy documents using vector search and AI analysis.
+    
+    **Input:**
+    - `message` (string): User's question about the policies
+    - `pdf_urls` (list): List of PDF URLs to search and analyze
+    - `session_id` (string, optional): Session ID for maintaining conversation context
+    - `collection_name` (string, optional): Qdrant collection name (default: "policy_chunks2")
+    - `mongo_collection_name` (string, optional): MongoDB collection name (default: "policies")
+    - `top_k` (int, optional): Number of top chunks to retrieve from vector search (default: 10)
+    
+    **Output:**
+    - `response` (string): AI assistant's comparative analysis and response
+    - `policy_info` (object): Information about the loaded policies
+        - `total_policies` (int): Number of policies loaded
+        - `total_tokens` (int): Total tokens across all policies
+        - `policies` (list): List of policy information including title, URL, and token count
+        - `chat_session_messages` (int): Number of messages in current session
+    - `session_id` (string): Session ID for this conversation
+    - `token_usage` (object): Token usage and cost information
+    - `is_initial_analysis` (boolean): Whether this is the first message in the session
+    
+    **Example Request:**
+    ```json
+    {
+        "message": "Which policy provides better coverage for diabetes?",
+        "pdf_urls": [
+            "https://example.com/health-policy-1.pdf",
+            "https://example.com/health-policy-2.pdf"
+        ],
+        "session_id": "user123_multi456",
+        "collection_name": "policy_chunks2",
+        "mongo_collection_name": "policies",
+        "top_k": 15
+    }
+    ```
+    
+    **Example Response:**
+    ```json
+    {
+        "response": "Based on my analysis of both policies, Policy A provides better diabetes coverage because...",
+        "policy_info": {
+            "total_policies": 2,
+            "total_tokens": 85000,
+            "policies": [
+                {
+                    "title": "Comprehensive Health Insurance Policy A",
+                    "url": "https://example.com/health-policy-1.pdf",
+                    "content_tokens": 45000
+                },
+                {
+                    "title": "Premium Health Coverage Policy B",
+                    "url": "https://example.com/health-policy-2.pdf",
+                    "content_tokens": 40000
+                }
+            ],
+            "chat_session_messages": 2
+        },
+        "session_id": "user123_multi456",
+        "token_usage": {
+            "total_cost": 0.0456,
+            "totals": {
+                "total_tokens": 2150
+            }
+        },
+        "is_initial_analysis": true
+    }
+    ```
+    """
+    try:
+        import uuid
+        import time
+        
+        # Generate session ID if not provided
+        session_id = request.session_id or f"multi_policy_chat_{uuid.uuid4().hex[:8]}"
+        
+        # Get or create multi-policy chat instance
+        multi_policy_chat = await get_or_create_multi_policy_chat(
+            session_id, request.pdf_urls, request.collection_name, request.mongo_collection_name
+        )
+        
+        # Check if this is the first message (initial analysis)
+        is_initial_analysis = len(multi_policy_chat.policy_documents) == 0
+        
+        start_time = time.time()
+        
+        # Always use start_policy_analysis for every query with the session's constant filter URLs
+        logger.info(f"Processing query with vector search for {len(request.pdf_urls)} URLs")
+        response_text = await multi_policy_chat.start_policy_analysis(
+            user_query=request.message,
+            filter_urls=request.pdf_urls,
+            top_k=request.top_k
+        )
+        
+        processing_time = time.time() - start_time
+        
+        # Get policy information
+        policies_info_dict = multi_policy_chat.get_loaded_policies_info()
+        
+        # Convert to response format
+        policies_list = []
+        for policy in policies_info_dict.get("policies", []):
+            policies_list.append(MultiPolicyInfo(
+                title=policy["title"],
+                url=policy["url"],
+                content_tokens=policy["content_tokens"]
+            ))
+        
+        policy_info = MultiPolicyChatInfo(
+            total_policies=policies_info_dict.get("total_policies", 0),
+            total_tokens=policies_info_dict.get("total_tokens", 0),
+            policies=policies_list,
+            chat_session_messages=policies_info_dict.get("chat_session_messages", 0)
+        )
+        
+        # Get token usage
+        token_usage = multi_policy_chat.get_token_usage_summary()
+        
+        # Prepare response
+        chat_response = MultiPolicyChatResponse(
+            response=response_text,
+            policy_info=policy_info,
+            session_id=session_id,
+            token_usage=token_usage,
+            is_initial_analysis=is_initial_analysis
+        )
+        
+        logger.info(f"Multi-policy chat completed in {processing_time:.2f}s - Session: {session_id}")
+        logger.info(f"Loaded {policy_info.total_policies} policies with {policy_info.total_tokens:,} total tokens")
+        return chat_response
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error in multi-policy chat endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process multi-policy chat: {str(e)}")
+
+@app.delete("/chat-with-multiple-policies/{session_id}")
+async def close_multi_policy_chat_session(session_id: str):
+    """
+    Close a multi-policy chat session and clean up resources.
+    
+    **Input:**
+    - `session_id` (string): Session ID to close
+    
+    **Output:**
+    - `message` (string): Confirmation message
+    - `session_closed` (boolean): Whether session was successfully closed
+    """
+    global multi_policy_chat_instances
+    
+    if session_id in multi_policy_chat_instances:
+        try:
+            multi_policy_chat_instances[session_id].close()
+            del multi_policy_chat_instances[session_id]
+            logger.info(f"Closed multi-policy chat session: {session_id}")
+            return {
+                "message": f"Multi-policy chat session {session_id} closed successfully",
+                "session_closed": True
+            }
+        except Exception as e:
+            logger.error(f"Error closing multi-policy chat session {session_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to close session: {str(e)}")
+    else:
+        return {
+            "message": f"Multi-policy chat session {session_id} not found",
+            "session_closed": False
+        }
+
+@app.get("/chat-with-multiple-policies/sessions")
+async def list_multi_policy_chat_sessions():
+    """
+    List all active multi-policy chat sessions.
+    
+    **Output:**
+    - `active_sessions` (list): List of active session information
+    - `total_sessions` (int): Total number of active sessions
+    """
+    global multi_policy_chat_instances
+    
+    sessions = []
+    for session_id, multi_policy_chat in multi_policy_chat_instances.items():
+        policies_info = multi_policy_chat.get_loaded_policies_info()
+        sessions.append({
+            "session_id": session_id,
+            "total_policies": policies_info.get("total_policies", 0),
+            "total_tokens": policies_info.get("total_tokens", 0),
+            "messages_count": policies_info.get("chat_session_messages", 0),
+            "policy_titles": [policy["title"] for policy in policies_info.get("policies", [])]
+        })
+    
+    return {
+        "active_sessions": sessions,
+        "total_sessions": len(sessions)
+    }
 
 @app.post("/chat-with-policy", response_model=PolicyChatResponse)
 async def chat_with_policy(request: PolicyChatRequest):
@@ -888,13 +1135,15 @@ async def health_check():
     - `agent_initialized` (boolean): Whether the insurance agent is ready
     - `policy_recommender_initialized` (boolean): Whether the policy recommender is ready
     - `active_policy_chat_sessions` (int): Number of active policy chat sessions
+    - `active_multi_policy_chat_sessions` (int): Number of active multi-policy chat sessions
     """
-    global agent, policy_recommender, policy_chat_instances
+    global agent, policy_recommender, policy_chat_instances, multi_policy_chat_instances
     return {
         "status": "healthy",
         "agent_initialized": agent is not None,
         "policy_recommender_initialized": policy_recommender is not None,
-        "active_policy_chat_sessions": len(policy_chat_instances)
+        "active_policy_chat_sessions": len(policy_chat_instances),
+        "active_multi_policy_chat_sessions": len(multi_policy_chat_instances)
     }
 
 @app.get("/")
@@ -911,6 +1160,7 @@ async def root():
         "endpoints": {
             "/chat": "POST - Chat with the insurance agent",
             "/chat-with-policy": "POST - Chat with a specific policy document",
+            "/chat-with-multiple-policies": "POST - Chat with multiple policy documents using vector search",
             "/recommend-policies": "POST - Get AI-powered policy recommendations",
             "/policy-analyzer": "POST - Analyze a policy document",
             "/health": "GET - Health check",

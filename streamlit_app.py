@@ -41,6 +41,12 @@ if "selected_policy_url" not in st.session_state:
 if "form_recommendations" not in st.session_state:
     st.session_state.form_recommendations = []
 
+# Multi-policy chat tab states
+if "multi_policy_chat_sessions" not in st.session_state:
+    st.session_state.multi_policy_chat_sessions = {}
+if "selected_policy_urls" not in st.session_state:
+    st.session_state.selected_policy_urls = []
+
 def check_api_health():
     """Check if the API is available and healthy."""
     try:
@@ -66,7 +72,7 @@ def send_chat_message(message: str, conversation_history: List[Dict], user_profi
             f"{API_BASE_URL}/chat",
             json=request_data,
             headers={"Content-Type": "application/json"},
-            timeout=30
+            timeout=300
         )
         
         if response.status_code == 200:
@@ -102,7 +108,7 @@ def send_policy_recommendation_request(user_profile: Dict, top_k: int = 20, top_
             f"{API_BASE_URL}/recommend-policies",
             json=request_data,
             headers={"Content-Type": "application/json"},
-            timeout=60
+            timeout=300
         )
         
         if response.status_code == 200:
@@ -128,7 +134,7 @@ def send_policy_chat_message(pdf_url: str, message: str, session_id: str = None)
             f"{API_BASE_URL}/chat-with-policy",
             json=request_data,
             headers={"Content-Type": "application/json"},
-            timeout=60
+            timeout=300
         )
         
         if response.status_code == 200:
@@ -138,6 +144,34 @@ def send_policy_chat_message(pdf_url: str, message: str, session_id: str = None)
             
     except Exception as e:
         logger.error(f"Error in policy chat: {e}")
+        return {"error": str(e)}
+
+def send_multi_policy_chat_message(message: str, pdf_urls: List[str], session_id: str = None) -> Dict:
+    """Send message to multi-policy chat endpoint."""
+    try:
+        request_data = {
+            "message": message,
+            "pdf_urls": pdf_urls,
+            "session_id": session_id,
+            "collection_name": "policy_chunks2",
+            "mongo_collection_name": "policies",
+            "top_k": 10
+        }
+        
+        response = requests.post(
+            f"{API_BASE_URL}/chat-with-multiple-policies",
+            json=request_data,
+            headers={"Content-Type": "application/json"},
+            timeout=300
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": f"API Error: {response.status_code}"}
+            
+    except Exception as e:
+        logger.error(f"Error in multi-policy chat: {e}")
         return {"error": str(e)}
 
 def send_policy_analysis_request(pdf_url: str) -> Dict:
@@ -348,13 +382,8 @@ def recommend_policies_tab():
         
         additional_notes = st.text_area("Additional Notes", placeholder="Any specific requirements or preferences...")
         
-        col1, col2, col3 = st.columns(3)
-        # with col1:
-        #     top_k = st.number_input("Policies to Search", min_value=5, max_value=50, value=20)
-        # with col2:
-        #     top_n = st.number_input("Final Recommendations", min_value=1, max_value=20, value=5)
-        top_k=20
-        top_n=5
+        top_k = 20
+        top_n = 5
         submitted = st.form_submit_button("Get Recommendations")
     
     # Handle form submission outside the form
@@ -427,15 +456,9 @@ def policy_chat_tab():
         for message in session_data["messages"]:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-                # if message["role"] == "assistant" and "document_info" in message:
-                #     doc_info = message["document_info"]
-                    # with st.expander("Document Info"):
-                    #     st.write(f"**Title:** {doc_info['title']}")
-                    #     st.write(f"**Chunks:** {doc_info['total_chunks']}")
-                    #     st.write(f"**Tokens:** {doc_info['total_tokens']:,}")
     
-    # Chat input at the bottom with unique key
-    if prompt := st.chat_input("Ask questions about this policy...", key="policy_chat_input"):
+    # Chat input at the bottom
+    if prompt := st.chat_input("Ask questions about this policy...", key=f"policy_chat_input_{session_key}"):
         # Add user message
         user_message = {"role": "user", "content": prompt}
         session_data["messages"].append(user_message)
@@ -466,6 +489,144 @@ def policy_chat_tab():
         # Rerun to display the new messages
         st.rerun()
 
+def multi_policy_chat_tab():
+    """Multiple policies chat tab."""
+    st.header("Chat with Multiple Policies")
+    
+    # Create main containers
+    url_input_container = st.container()
+    chat_container = st.container()
+    input_container = st.container()
+    
+    # URL input section at top
+    with url_input_container:
+        # Option to add URLs manually or use from recommendations
+        url_source = st.radio(
+            "Policy URLs Source",
+            ["Enter Manually", "Use from Recommendations"],
+            horizontal=True
+        )
+        
+        if url_source == "Enter Manually":
+            urls_input = st.text_area(
+                "Enter Policy URLs (one per line)",
+                value="\n".join(st.session_state.selected_policy_urls),
+                height=100,
+                help="Enter each policy document URL on a new line"
+            )
+            if urls_input:
+                st.session_state.selected_policy_urls = [
+                    url.strip() for url in urls_input.split("\n")
+                    if url.strip()
+                ]
+        else:
+            # Get URLs from recommendations if available
+            available_urls = []
+            if st.session_state.form_recommendations:
+                available_urls.extend([
+                    rec.get("pdf_link", "") 
+                    for rec in st.session_state.form_recommendations
+                    if rec.get("pdf_link")
+                ])
+            
+            # Get URLs from chat recommendations
+            for msg in st.session_state.chat_messages:
+                if msg["role"] == "assistant" and "metadata" in msg:
+                    if msg["metadata"].get("policies_found"):
+                        available_urls.extend([
+                            p.get("pdf_link", "")
+                            for p in msg["metadata"]["policies_found"]
+                            if p.get("pdf_link")
+                        ])
+            
+            # Remove duplicates while preserving order
+            available_urls = list(dict.fromkeys(available_urls))
+            
+            if not available_urls:
+                st.warning("No policy URLs available from recommendations. Please use the Chat or Form Recommendations tabs first.")
+            else:
+                selected_urls = st.multiselect(
+                    "Select Policy URLs",
+                    available_urls,
+                    default=st.session_state.selected_policy_urls,
+                    format_func=lambda x: x.split("/")[-1]
+                )
+                st.session_state.selected_policy_urls = selected_urls
+    
+    if not st.session_state.selected_policy_urls:
+        st.info("Please add policy URLs to start chatting")
+        return
+    
+    # Display selected policies
+    with st.expander("Selected Policies", expanded=False):
+        for i, url in enumerate(st.session_state.selected_policy_urls, 1):
+            st.markdown(f"{i}. [{url.split('/')[-1]}]({url})")
+    
+    # Create session for these URLs
+    urls_hash = abs(hash(tuple(sorted(st.session_state.selected_policy_urls))))
+    session_key = f"multi_policy_chat_{urls_hash}"
+    
+    if session_key not in st.session_state.multi_policy_chat_sessions:
+        st.session_state.multi_policy_chat_sessions[session_key] = {
+            "messages": [],
+            "session_id": str(uuid.uuid4())[:8],
+            "pdf_urls": st.session_state.selected_policy_urls.copy()
+        }
+    
+    session_data = st.session_state.multi_policy_chat_sessions[session_key]
+    
+    # Chat messages display
+    with chat_container:
+        for message in session_data["messages"]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                if message["role"] == "assistant" and "policy_info" in message:
+                    policy_info = message["policy_info"]
+                    with st.expander("Analyzed Policies Info", expanded=False):
+                        st.markdown(f"**Total Policies:** {policy_info['total_policies']}")
+                        st.markdown(f"**Total Tokens:** {policy_info['total_tokens']:,}")
+                        for policy in policy_info['policies']:
+                            st.markdown(f"- {policy['title']} ({policy['content_tokens']:,} tokens)")
+    
+    # Chat input at the bottom
+    with input_container:
+        if prompt := st.chat_input(
+            "Ask questions about these policies...",
+            key=f"multi_policy_chat_input_{session_key}"
+        ):
+            # Add user message
+            user_message = {"role": "user", "content": prompt}
+            session_data["messages"].append(user_message)
+            
+            # Get response
+            with st.spinner("Analyzing policies..."):
+                response = send_multi_policy_chat_message(
+                    prompt,
+                    session_data["pdf_urls"],
+                    session_data["session_id"]
+                )
+                
+                if "error" in response:
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": f"Error: {response['error']}",
+                        "policy_info": {}
+                    }
+                else:
+                    assistant_response = response.get("response", "No response received")
+                    policy_info = response.get("policy_info", {})
+                    
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": assistant_response,
+                        "policy_info": policy_info
+                    }
+                
+                session_data["messages"].append(assistant_message)
+            
+            # Rerun to display the new messages
+            st.rerun()
+
 def policy_analysis_tab():
     """Policy analysis tab."""
     st.header("Policy Document Analysis")
@@ -485,15 +646,6 @@ def policy_analysis_tab():
                     st.error(f"Error: {result['error']}")
                 else:
                     st.success(f"Analysis completed in {result.get('processing_time_seconds', 0):.1f}s")
-                    
-                    # Display document info
-                    # col1, col2, col3 = st.columns(3)
-                    # with col1:
-                    #     st.metric("Document", result.get('document_title', 'Unknown'))
-                    # with col2:
-                    #     st.metric("Chunks", result.get('total_chunks', 0))
-                    # with col3:
-                    #     st.metric("Tokens", f"{result.get('total_tokens', 0):,}")
                     
                     # Display analysis
                     st.markdown("### Analysis Results")
@@ -517,7 +669,13 @@ def main():
         return
     
     # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Chat Recommendations", "Form Recommendations", "Policy Chat", "Policy Analysis"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Chat Recommendations",
+        "Form Recommendations", 
+        "Multi-Policy Chat",
+        "Policy Chat",
+        "Policy Analysis"
+    ])
     
     with tab1:
         chat_tab()
@@ -526,9 +684,12 @@ def main():
         recommend_policies_tab()
     
     with tab3:
-        policy_chat_tab()
+        multi_policy_chat_tab()
     
     with tab4:
+        policy_chat_tab()
+    
+    with tab5:
         policy_analysis_tab()
     
     # Sidebar

@@ -29,9 +29,9 @@ class MongoDBClient:
         try:
             self.client = MongoClient(
                 self.mongo_uri,
-                serverSelectionTimeoutMS=5000,  # 5 second timeout
-                connectTimeoutMS=5000,
-                socketTimeoutMS=5000,
+                serverSelectionTimeoutMS=50000, # 50 second timeout
+                connectTimeoutMS=50000,
+                socketTimeoutMS=50000,
                 maxPoolSize=50,
                 minPoolSize=5
             )

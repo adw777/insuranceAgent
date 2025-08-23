@@ -91,7 +91,18 @@ policy_analyzer -> takes pdf_url -> analyzes policy for multiple scenarios -> re
 
 
 streamlit_app -> tabs for different endpoints
-/chat : recommenation via chat (whats in the streamlit right now)
+/chat : recommenation via chat 
 /recommend-policies : user fills out a form (gives crucial info) and policies would be recommended
 /chat-with-policy : when user gets recommended policies in both flows (chat or recommend-policies) for each policy user can click on that policy and chat with the policy using this endpoint (pdf_url for the selected policy will go as input for this endpoint); this will be like chat in the /chat endpoint
 /policy-analyzer : this is also similar, but not in chat format. for a selected policy from the recommended policies from chat or recommend-policies, url of the selected policy will be the input and this returns a detailed analysis in markdown
+
+
+a new endpoint chat-with-policy across all policies that have been recommended!
+
+so via /chat we get 'n' policies recomended!
+and via /recommend-policies too we get 'n' or 'm' policies recommended
+
+now /chat-with-all-policies - will enable chatting with all the selected policies - so what we will do is 
+take the urls of recommended policies and while answering the user queries - only search for those urls in qdrant in the pdf_link field and we will use it as a filter search - so for every user query we will get the most relevant top_k chunks only from those urls which have been recommended in either /chat or /recommend-policies  
+and then get their chunk from the "chunk" field and use the chunks to answer the answer the qustion & respond to the user!
+

@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-Insurance Policy Chat Assistant
-
-This script provides a chat interface for insurance policy documents.
-It searches for a PDF URL in MongoDB, retrieves the parsed content,
-chunks it appropriately, and provides an AI-powered chat interface
-using Gemini to help users understand and select insurance policies.
-"""
-
 import os
 import sys
 import logging
@@ -158,7 +148,7 @@ class DocumentChunker:
 class PolicyDocumentChat:
     """Main class for policy document chat functionality."""
     
-    def __init__(self, collection_name: str = "policy_documents"):
+    def __init__(self, collection_name: str = "policies"):
         self.collection_name = collection_name
         self.mongo_client = None
         self.gemini_client = None
@@ -281,6 +271,7 @@ Your role is to help users understand and evaluate this insurance policy. Please
 4. Point out important details they should consider
 5. If information is not available in the provided sections, clearly state that
 6. Be helpful in guiding policy selection decisions
+7. Provide Proper Citations from the given policy wherever required
 
 USER QUESTION: {user_query}
 
